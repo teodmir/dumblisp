@@ -47,7 +47,8 @@ module Program =
 
   // Lists; expressions separated by arbitrary amount of whitespace
   let parseNormalList : Parser<LispVal, unit> = parse {
-    let! l = sepBy parseExpr spaces1
+    let! l = sepBy parseExpr spaces
+    do! spaces
     return List l
     }
 
@@ -58,12 +59,19 @@ module Program =
     }
 
   // Parse either normal lists or dotted lists.
-  let parseList = parse {
-    do! skipChar '('
-    let! x = attempt parseNormalList <|> parseDottedList
-    do! skipChar ')'
-    return x
-    }
+  // let parseList = parse {
+  //   do! skipChar '(' .>> spaces
+  //   // Backtrack if parsing a normal list fails. Necessary since we
+  //   // may end up with a partially consumed stream if parseNormalList
+  //   // finds a dot.
+  //   // let! x = attempt parseNormalList <|> parseDottedList
+  //   let! x = parseNormalList
+  //   do! skipChar ')' .>> spaces
+  //   return x
+  //   }
+
+  // fixme
+  let parseList : Parser<LispVal, unit> = (pchar '(' >>. spaces >>. sepEndBy parseExpr spaces1 .>> spaces .>> pchar ')' .>> spaces) |>> List
 
   // Quoted expressions: store the whole expression that succeeds the
   // quote character. Syntactic sugar for the special form (quote x).
@@ -73,7 +81,7 @@ module Program =
     return List [Atom "quote"; x]
     }
 
-// High level expression parser, combined from the other parsers.
+  // High level expression parser, combined from the other parsers.
   parseExpr' :=
     parseAtom
     <|> parseString
@@ -87,10 +95,15 @@ module Program =
       match ws with
       | [] -> acc
       | [w] -> acc + w
-      | w::ws' -> unwords' ws' (w + " " + acc)
+      | w::ws' -> unwords' ws' (acc + w + " ")
     in unwords' ws ""
 
   let listWrap (s : string) = "(" + s + ")"
+
+  let readExpr input =
+    match run parseExpr input with
+    | Success (result, _, _) -> result
+    | Failure (errorMsg, _, _) -> String errorMsg
 
   // Print the results of evaluation.
   let rec showVal value : string =
@@ -105,12 +118,42 @@ module Program =
         unwords (List.map showVal init) + " . " + showVal last
         |> listWrap
 
-  let readExpr input =
-    match run parseExpr input with
-    | Success (result, _, _) -> printfn "Success: %s" <| showVal result
-    | Failure (errorMsg, _, _) -> printfn "Failure: %s" errorMsg
+  let printVal = showVal >> printfn "%s"
+
+  // Type alias: Lisp functions take an arbitary amount of Lisp values
+  // and return another Lisp value
+  type LispFunction = LispVal list -> LispVal
+
+  let arithmeticOp (op : int -> int -> int) (argList : LispVal list) =
+    let getNum (v : LispVal) =
+      match v with
+      | Number v -> v
+      | _ -> 0
+    in List.map getNum argList |> List.reduce op |> Number
+
+  let primitives : Map<string, LispFunction> =
+    Map.ofList [
+      ("+", arithmeticOp (+))
+      ("-", arithmeticOp (-))
+      ("*", arithmeticOp (*))
+      ("/", arithmeticOp (/))
+    ]
+
+  let apply func args =
+    match Map.tryFind func primitives with
+    | Some f -> f args
+    | None -> Bool false
+
+  let rec eval (value : LispVal) =
+    match value with
+    // These evaluate to themselves.
+    | String _ | Number _ | Bool _ -> value
+    // Quoted expressions: a special case of 2 element lists.
+    // "Unquotes" the expression.
+    | List [Atom "quote"; value'] -> value'
+    | List (Atom f :: args) -> List.map eval args |> apply f
 
   [<EntryPoint>]
   let main argv =
-    readExpr argv.[0]
+    argv.[0] |> readExpr |> eval |> printVal
     0
