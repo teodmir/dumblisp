@@ -3,13 +3,14 @@ namespace DumbLisp
 open FParsec.Internals
 open FParsec.Primitives
 open FParsec.CharParsers
+open FSharp.Core
 
 module Program =
 
   type LispVal =
     | Atom of string
-    | List of LispVal list
-    | DottedList of LispVal list * LispVal
+    | List of list<LispVal>
+    | DottedList of list<LispVal> * LispVal
     | Number of int
     | String of string
     | Bool of bool
@@ -42,36 +43,31 @@ module Program =
     }
 
   // Forward declaration of the main parser function; necessary due to
-  // the mutually recursive calls
+  // the mutual calls
   let parseExpr, parseExpr' = createParserForwardedToRef ()
 
-  // Lists; expressions separated by arbitrary amount of whitespace
-  let parseNormalList : Parser<LispVal, unit> = parse {
-    let! l = sepBy parseExpr spaces
-    do! spaces
-    return List l
-    }
+  // Lists; expressions separated by arbitrary amount of whitespace,
+  // enclosed in brackets
+  let parseNormalList : Parser<LispVal, unit> =
+    pchar '(' >>. spaces >>.
+    sepEndBy parseExpr spaces .>>
+    pchar ')' |>> List
 
+  // Dottd lists: Lisp lists of the form (a b . c) Parses up the
+  // prefix to the dot as a normal list, and the suffix is parsed as a
+  // single expression
   let parseDottedList = parse {
-    let! init = parseExpr .>> spaces |> many
-    let! last = pchar '.' >>. spaces >>. parseExpr
+    do! pchar '(' >>. spaces
+    let! init = sepEndBy parseExpr spaces1
+    let! last = pchar '.' .>> spaces1 >>. parseExpr .>> spaces
+    do! skipChar ')'
     return DottedList (init, last)
     }
 
-  // Parse either normal lists or dotted lists.
-  // let parseList = parse {
-  //   do! skipChar '(' .>> spaces
-  //   // Backtrack if parsing a normal list fails. Necessary since we
-  //   // may end up with a partially consumed stream if parseNormalList
-  //   // finds a dot.
-  //   // let! x = attempt parseNormalList <|> parseDottedList
-  //   let! x = parseNormalList
-  //   do! skipChar ')' .>> spaces
-  //   return x
-  //   }
-
-  // fixme
-  let parseList : Parser<LispVal, unit> = (pchar '(' >>. spaces >>. sepEndBy parseExpr spaces1 .>> spaces .>> pchar ')' .>> spaces) |>> List
+  let parseList : Parser<LispVal, unit> =
+    // Try parsing a normal list; on failure, backtrack and parse as a
+    // dotted list
+    attempt parseNormalList <|> parseDottedList
 
   // Quoted expressions: store the whole expression that succeeds the
   // quote character. Syntactic sugar for the special form (quote x).
@@ -115,21 +111,57 @@ module Program =
     | Bool false -> "#f"
     | List xs -> List.map showVal xs |> unwords |> listWrap
     | DottedList (init, last) ->
-        unwords (List.map showVal init) + " . " + showVal last
-        |> listWrap
+        unwords (List.map showVal init) + " . " + showVal last |> listWrap
 
   let printVal = showVal >> printfn "%s"
 
   // Type alias: Lisp functions take an arbitary amount of Lisp values
   // and return another Lisp value
-  type LispFunction = LispVal list -> LispVal
 
+  type LispError =
+    | NumArgs of int * list<LispVal>
+    | TypeMismatch of string * LispVal
+    // | Parser of ParseError
+    | BadSpecialForm of string * LispVal
+    | NotFunction of string * string
+    | UnboundVar of string * string
+    | Default of string
+
+  let showError (err : LispError) : string =
+    match err with
+    | NumArgs (expected, found) ->
+        sprintf "Expected %d args; found values %s"
+                expected
+                ((List.map showVal found) |> unwords)
+    | TypeMismatch (expected, found) ->
+        sprintf "Invalid type: expected %s, found %s"
+                expected
+                (showVal found)
+    | BadSpecialForm (msg, form) -> msg + ": " + showVal form
+    | NotFunction (msg, func) -> msg + ": " + func
+    | UnboundVar (msg, var) -> msg + ": " + var
+
+  type LispFunction = LispVal list -> Result<LispVal, LispError>
+
+  // Generalization of the basic arithmetic operations in Lisp: used
+  // to partially and obtain the concrete functions +, -, * and /
   let arithmeticOp (op : int -> int -> int) (argList : LispVal list) =
-    let getNum (v : LispVal) =
-      match v with
-      | Number v -> v
-      | _ -> 0
-    in List.map getNum argList |> List.reduce op |> Number
+    match argList with
+    | [] -> Error <| NumArgs (2, argList)
+    | [_] -> Error <| NumArgs (2, argList)
+    | _ -> let getNum (v : LispVal) : Result<int, LispError> =
+             match v with
+             | Number x -> Ok x
+             | nonNum -> TypeMismatch ("number", nonNum) |> Error
+           // Where are typeclasses when you need them?
+           let liftBinOpToResult o (x : Result<int, LispError>) y =
+             match (x, y) with
+             | (Ok x', Ok y') -> op x' y' |> Ok
+             | (Error x', _) -> Error x'
+             | (_, Error y') -> Error y'
+           in List.map getNum argList |> List.reduce (liftBinOpToResult op) |>
+              fun x -> match x with | Ok x' -> Ok (Number x')
+                                    | Error x' -> Error x'
 
   let primitives : Map<string, LispFunction> =
     Map.ofList [
@@ -139,19 +171,22 @@ module Program =
       ("/", arithmeticOp (/))
     ]
 
-  let apply func args =
+  let apply (func : string) (args : list<LispVal>) : Result<LispVal, LispError> =
     match Map.tryFind func primitives with
     | Some f -> f args
-    | None -> Bool false
+    | None -> Error <| NotFunction ("Unrecognized primitive", func)
 
-  let rec eval (value : LispVal) =
+
+
+  let rec eval (value : LispVal) : Result<LispVal, LispError> =
     match value with
     // These evaluate to themselves.
-    | String _ | Number _ | Bool _ -> value
+    | String _ | Number _ | Bool _ -> Ok value
     // Quoted expressions: a special case of 2 element lists.
     // "Unquotes" the expression.
-    | List [Atom "quote"; value'] -> value'
-    | List (Atom f :: args) -> List.map eval args |> apply f
+    | List [Atom "quote"; value'] -> Ok value'
+    | List (Atom f :: args) -> List.map eval args |>  apply f
+    | badForm -> Error <| BadSpecialForm ("Unrecognized special form", badForm)
 
   [<EntryPoint>]
   let main argv =
