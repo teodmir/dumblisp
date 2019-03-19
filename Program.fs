@@ -3,7 +3,6 @@ namespace DumbLisp
 open FParsec.Internals
 open FParsec.Primitives
 open FParsec.CharParsers
-open FSharp.Core
 
 module Program =
 
@@ -118,50 +117,98 @@ module Program =
   // Type alias: Lisp functions take an arbitary amount of Lisp values
   // and return another Lisp value
 
-  type LispError =
-    | NumArgs of int * list<LispVal>
-    | TypeMismatch of string * LispVal
-    // | Parser of ParseError
-    | BadSpecialForm of string * LispVal
-    | NotFunction of string * string
-    | UnboundVar of string * string
-    | Default of string
+  // type LispError =
+  //   | NumArgs of int * list<LispVal>
+  //   | TypeMismatch of string * LispVal
+  //   // | Parser of ParseError
+  //   | BadSpecialForm of string * LispVal
+  //   | NotFunction of string * string
+  //   | UnboundVar of string * string
+  //   | Default of string
 
-  let showError (err : LispError) : string =
-    match err with
-    | NumArgs (expected, found) ->
-        sprintf "Expected %d args; found values %s"
-                expected
-                ((List.map showVal found) |> unwords)
-    | TypeMismatch (expected, found) ->
-        sprintf "Invalid type: expected %s, found %s"
-                expected
-                (showVal found)
-    | BadSpecialForm (msg, form) -> msg + ": " + showVal form
-    | NotFunction (msg, func) -> msg + ": " + func
-    | UnboundVar (msg, var) -> msg + ": " + var
+  // let showError (err : LispError) : string =
+  //   match err with
+  //   | NumArgs (expected, found) ->
+  //       sprintf "Expected %d args; found values %s"
+  //               expected
+  //               ((List.map showVal found) |> unwords)
+  //   | TypeMismatch (expected, found) ->
+  //       sprintf "Invalid type: expected %s, found %s"
+  //               expected
+  //               (showVal found)
+  //   | BadSpecialForm (msg, form) -> msg + ": " + showVal form
+  //   | NotFunction (msg, func) -> msg + ": " + func
+  //   | UnboundVar (msg, var) -> msg + ": " + var
 
-  type LispFunction = LispVal list -> Result<LispVal, LispError>
+  type LispFunction = LispVal list -> LispVal
+
+  // Helper function to extract a number from a LispVal; throws an exception
+  // if it isn't a Number
+  let getNum (v : LispVal) : int =
+    match v with
+    | Number x -> x
+    | _ -> failwith "Not a number"
 
   // Generalization of the basic arithmetic operations in Lisp: used
-  // to partially and obtain the concrete functions +, -, * and /
-  let arithmeticOp (op : int -> int -> int) (argList : LispVal list) =
+  // to partially apply and obtain the concrete functions +, -, * and /
+  let arithmeticOp (op : int -> int -> int) (argList : list<LispVal>) : LispVal =
     match argList with
-    | [] -> Error <| NumArgs (2, argList)
-    | [_] -> Error <| NumArgs (2, argList)
-    | _ -> let getNum (v : LispVal) : Result<int, LispError> =
-             match v with
-             | Number x -> Ok x
-             | nonNum -> TypeMismatch ("number", nonNum) |> Error
-           // Where are typeclasses when you need them?
-           let liftBinOpToResult o (x : Result<int, LispError>) y =
-             match (x, y) with
-             | (Ok x', Ok y') -> op x' y' |> Ok
-             | (Error x', _) -> Error x'
-             | (_, Error y') -> Error y'
-           in List.map getNum argList |> List.reduce (liftBinOpToResult op) |>
-              fun x -> match x with | Ok x' -> Ok (Number x')
-                                    | Error x' -> Error x'
+    | [] | [_] -> failwith "Invalid number of arguments"
+    | _ -> List.map getNum argList |> List.reduce op |> Number
+
+  let numBoolBinOp (op : int -> int -> bool) (argList : list<LispVal>) =
+    match argList with
+    | [x; y] -> op (getNum x) (getNum y) |> Bool
+    | _ -> failwith "Invalid amount of arguments"
+
+  // Internal function for determining truthiness with Scheme semantics:
+  // that is, anything that is not #f
+  let lispTrue (x : LispVal) : bool =
+    match x with
+    | Bool false -> false
+    | _ -> true
+
+  // Used for AND, OR: extend the binary operator op to work on lists while
+  // preserving the semantics
+  let LispLogicalOp (op : LispVal -> LispVal -> LispVal)
+                    (argList : list<LispVal>) =
+    match argList with
+    | [] -> failwith "Invalid amount of arguments"
+    | _ -> List.reduce op argList
+
+  // Evaluate the elements of argList and return the first one that is true.
+  let lispOr argList =
+    let lispBinOr (x : LispVal) (y : LispVal) =
+      match x with
+      | _ when lispTrue x -> x
+      | _ -> y
+    in LispLogicalOp lispBinOr argList
+
+  // Evaluate the elements of argList until one is false.
+  // If all of them are true, return the last one.
+  let lispAnd argList =
+    let lispBinAnd (x : LispVal) (y : LispVal) =
+      match x with
+      | _ when lispTrue x -> y
+      | _ -> Bool false
+    in LispLogicalOp lispBinAnd argList
+
+  let lispNot (argList : list<LispVal>) : LispVal =
+    match argList with
+    | [x] -> if lispTrue x then Bool false else Bool true
+    | _ -> failwith "Invalid number of arguments"
+
+  let lispIf (argList : list<LispVal>) : LispVal =
+    match argList with
+    | [pred; expr1; expr2] -> if lispTrue pred then expr1 else expr2
+    | _ -> failwith "Invalid number of arguments"
+
+  let lispCar (argList : list<LispVal>) : LispVal =
+    match argList with
+    | [List (x::_)] -> x
+    | [DottedList (x::_, _)] -> x
+    | [_] -> failwith "Invalid type"
+    | [] | _::_ -> failwith "Invalid number of arguments"
 
   let primitives : Map<string, LispFunction> =
     Map.ofList [
@@ -169,25 +216,40 @@ module Program =
       ("-", arithmeticOp (-))
       ("*", arithmeticOp (*))
       ("/", arithmeticOp (/))
+      ("=", numBoolBinOp (=))
+      ("/=", numBoolBinOp (<>))
+      (">", numBoolBinOp (>))
+      (">=", numBoolBinOp (>=))
+      ("<", numBoolBinOp (<))
+      ("<=", numBoolBinOp (<=))
+      ("or", lispOr)
+      ("and", lispAnd)
+      ("not", lispNot)
+      ("if", lispIf)
+      ("car", lispCar)
     ]
 
-  let apply (func : string) (args : list<LispVal>) : Result<LispVal, LispError> =
+  let apply (func : string) (args : list<LispVal>) : LispVal =
     match Map.tryFind func primitives with
     | Some f -> f args
-    | None -> Error <| NotFunction ("Unrecognized primitive", func)
+    | None -> failwith "Unknown primitive function"
 
-
-
-  let rec eval (value : LispVal) : Result<LispVal, LispError> =
+  let rec eval (value : LispVal) =
     match value with
     // These evaluate to themselves.
-    | String _ | Number _ | Bool _ -> Ok value
+    | String _ | Number _ | Bool _ -> value
     // Quoted expressions: a special case of 2 element lists.
     // "Unquotes" the expression.
-    | List [Atom "quote"; value'] -> Ok value'
-    | List (Atom f :: args) -> List.map eval args |>  apply f
-    | badForm -> Error <| BadSpecialForm ("Unrecognized special form", badForm)
+    // Cannot be implemented as a primitive since that would force recursive
+    // evaluation according to the standard list format.
+    | List [Atom "quote"; value'] -> value'
+    | List (Atom f :: args) -> List.map eval args |> apply f
+    | badForm -> failwith "Invalid Lisp form"
 
+  // TODO: checking arglist arity is so common it probably should be abstracted
+  // for the following use cases: Exactly n | AtLeast n
+  // - More comments
+  // cdr, cons, list
   [<EntryPoint>]
   let main argv =
     argv.[0] |> readExpr |> eval |> printVal
