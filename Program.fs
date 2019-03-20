@@ -3,6 +3,8 @@ namespace DumbLisp
 open FParsec.Internals
 open FParsec.Primitives
 open FParsec.CharParsers
+open FParsec.Error
+open System
 
 module Program =
 
@@ -52,7 +54,7 @@ module Program =
     sepEndBy parseExpr spaces .>>
     pchar ')' |>> List
 
-  // Dottd lists: Lisp lists of the form (a b . c) Parses up the
+  // Dotted lists: Lisp lists of the form (a b . c) Parses up the
   // prefix to the dot as a normal list, and the suffix is parsed as a
   // single expression
   let parseDottedList = parse {
@@ -84,6 +86,10 @@ module Program =
     <|> parseQuoted
     <|> parseList
 
+  // For user interaction: ignore leading and trailing whitespace, but
+  // ensure there are no other trailing characters as well
+  let parseInteractive = spaces >>. parseExpr .>> spaces .>> eof
+
   let unwords (ws : string list) =
     // Helper function to allow tail recursion (at the cost of readability)
     let rec unwords' ws acc =
@@ -96,9 +102,9 @@ module Program =
   let listWrap (s : string) = "(" + s + ")"
 
   let readExpr input =
-    match run parseExpr input with
+    match run parseInteractive input with
     | Success (result, _, _) -> result
-    | Failure (errorMsg, _, _) -> String errorMsg
+    | Failure (errorMsg,  _, _) -> String errorMsg
 
   // Print the results of evaluation.
   let rec showVal value : string =
@@ -113,32 +119,6 @@ module Program =
         unwords (List.map showVal init) + " . " + showVal last |> listWrap
 
   let printVal = showVal >> printfn "%s"
-
-  // Type alias: Lisp functions take an arbitary amount of Lisp values
-  // and return another Lisp value
-
-  // type LispError =
-  //   | NumArgs of int * list<LispVal>
-  //   | TypeMismatch of string * LispVal
-  //   // | Parser of ParseError
-  //   | BadSpecialForm of string * LispVal
-  //   | NotFunction of string * string
-  //   | UnboundVar of string * string
-  //   | Default of string
-
-  // let showError (err : LispError) : string =
-  //   match err with
-  //   | NumArgs (expected, found) ->
-  //       sprintf "Expected %d args; found values %s"
-  //               expected
-  //               ((List.map showVal found) |> unwords)
-  //   | TypeMismatch (expected, found) ->
-  //       sprintf "Invalid type: expected %s, found %s"
-  //               expected
-  //               (showVal found)
-  //   | BadSpecialForm (msg, form) -> msg + ": " + showVal form
-  //   | NotFunction (msg, func) -> msg + ": " + func
-  //   | UnboundVar (msg, var) -> msg + ": " + var
 
   type LispFunction = LispVal list -> LispVal
 
@@ -198,17 +178,34 @@ module Program =
     | [x] -> if lispTrue x then Bool false else Bool true
     | _ -> failwith "Invalid number of arguments"
 
-  let lispIf (argList : list<LispVal>) : LispVal =
-    match argList with
-    | [pred; expr1; expr2] -> if lispTrue pred then expr1 else expr2
-    | _ -> failwith "Invalid number of arguments"
-
+  // The first element of a list
   let lispCar (argList : list<LispVal>) : LispVal =
     match argList with
     | [List (x::_)] -> x
     | [DottedList (x::_, _)] -> x
     | [_] -> failwith "Invalid type"
     | [] | _::_ -> failwith "Invalid number of arguments"
+
+  // The tail of a list
+  // TODO: error for empty list
+  let lispCdr (argList : list<LispVal>) : LispVal =
+    match argList with
+    | [List (_::xs)] -> List xs
+    | [List []] -> failwith "cdr: "
+    | [DottedList ([_], x)] -> x
+    | [DottedList ((_::xs), x)] -> DottedList (xs, x)
+    | [_] -> failwith "Invalid type"
+    | [] | _::_ -> failwith "Invalid number of arguments"
+
+  let lispCons (argList : list<LispVal>) : LispVal =
+    match argList with
+    | [x; List xs] -> List (x::xs)
+    | [x; DottedList (xs, final)] -> DottedList (x::xs, final)
+    | [expr1; expr2] -> DottedList ([expr1], expr2)
+    | [_] -> failwith "Invalid type"
+    | [] | _::_ -> failwith "Invalid number of arguments"
+
+  let lispList (argList : list<LispVal>) : LispVal = List argList
 
   let primitives : Map<string, LispFunction> =
     Map.ofList [
@@ -225,8 +222,10 @@ module Program =
       ("or", lispOr)
       ("and", lispAnd)
       ("not", lispNot)
-      ("if", lispIf)
       ("car", lispCar)
+      ("cdr", lispCdr)
+      ("cons", lispCons)
+      ("list", lispList)
     ]
 
   let apply (func : string) (args : list<LispVal>) : LispVal =
@@ -239,18 +238,41 @@ module Program =
     // These evaluate to themselves.
     | String _ | Number _ | Bool _ -> value
     // Quoted expressions: a special case of 2 element lists.
-    // "Unquotes" the expression.
-    // Cannot be implemented as a primitive since that would force recursive
-    // evaluation according to the standard list format.
-    | List [Atom "quote"; value'] -> value'
+    // "Unquotes" the expression.  Cannot be implemented as a
+    // primitive since that would force recursive evaluation according
+    // to the standard list format.
+    | List (Atom "quote" :: args) ->
+        match args with
+        | [expr] -> expr
+        | _ -> failwith "quote: expected single argument"
+    // "if" has to be a special form: otherwise, due to eager
+    // evaluation, we end up evaluating both branches
+    | List (Atom "if" :: args) ->
+        match args with
+        | [pred; expr1; expr2] -> if lispTrue pred
+                                  then eval expr1
+                                  else eval expr2
+        | _ -> failwith "if: Invalid arguments: expected (if pred expr1 expr2)"
     | List (Atom f :: args) -> List.map eval args |> apply f
     | badForm -> failwith "Invalid Lisp form"
 
+  let readPrompt prompt = printf "%s" prompt ; Console.ReadLine()
+
+  type MaybeLispVal = Redo | Done of LispVal
+
+  let rec REPL () =
+    match readPrompt "λ> " with
+    | s when s.Trim() = ";" -> ()
+    | s -> readExpr s |> eval |> printVal ; REPL ()
+
+
   // TODO: checking arglist arity is so common it probably should be abstracted
-  // for the following use cases: Exactly n | AtLeast n
   // - More comments
-  // cdr, cons, list
+  // - generalize equality
+  // - Multiline REPL input
+  // - user-created exceptions
   [<EntryPoint>]
   let main argv =
-    argv.[0] |> readExpr |> eval |> printVal
+    printfn "%s\n%s" "dumblisp REPL" "Enter ';' to exit."
+    REPL ()
     0
