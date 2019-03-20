@@ -122,24 +122,28 @@ module Program =
 
   type LispFunction = LispVal list -> LispVal
 
+  exception LispUnboundException of string
+  exception LispNumArgsException of string
+  exception LispTypeException of string
+
   // Helper function to extract a number from a LispVal; throws an exception
   // if it isn't a Number
   let getNum (v : LispVal) : int =
     match v with
     | Number x -> x
-    | _ -> failwith "Not a number"
+    | _ -> raise <| LispTypeException "Not a number"
 
   // Generalization of the basic arithmetic operations in Lisp: used
   // to partially apply and obtain the concrete functions +, -, * and /
   let arithmeticOp (op : int -> int -> int) (argList : list<LispVal>) : LispVal =
     match argList with
-    | [] | [_] -> failwith "Invalid number of arguments"
+    | [] | [_] -> raise <| LispNumArgsException "Invalid number of arguments"
     | _ -> List.map getNum argList |> List.reduce op |> Number
 
   let numBoolBinOp (op : int -> int -> bool) (argList : list<LispVal>) =
     match argList with
     | [x; y] -> op (getNum x) (getNum y) |> Bool
-    | _ -> failwith "Invalid amount of arguments"
+    | _ -> raise <| LispNumArgsException "Invalid amount of arguments"
 
   // Internal function for determining truthiness with Scheme semantics:
   // that is, anything that is not #f
@@ -153,7 +157,7 @@ module Program =
   let LispLogicalOp (op : LispVal -> LispVal -> LispVal)
                     (argList : list<LispVal>) =
     match argList with
-    | [] -> failwith "Invalid amount of arguments"
+    | [] -> raise <| LispNumArgsException "Invalid amount of arguments"
     | _ -> List.reduce op argList
 
   // Evaluate the elements of argList and return the first one that is true.
@@ -176,34 +180,34 @@ module Program =
   let lispNot (argList : list<LispVal>) : LispVal =
     match argList with
     | [x] -> if lispTrue x then Bool false else Bool true
-    | _ -> failwith "Invalid number of arguments"
+    | _ -> raise <| LispNumArgsException "Invalid number of arguments"
 
   // The first element of a list
   let lispCar (argList : list<LispVal>) : LispVal =
     match argList with
     | [List (x::_)] -> x
     | [DottedList (x::_, _)] -> x
-    | [_] -> failwith "Invalid type"
-    | [] | _::_ -> failwith "Invalid number of arguments"
+    | [_] -> raise <| LispTypeException "Invalid type"
+    | [] | _::_ -> raise <| LispNumArgsException "Invalid number of arguments"
 
   // The tail of a list
   // TODO: error for empty list
   let lispCdr (argList : list<LispVal>) : LispVal =
     match argList with
     | [List (_::xs)] -> List xs
-    | [List []] -> failwith "cdr: "
+    | [List []] -> raise <| LispTypeException "cdr: Empty list"
     | [DottedList ([_], x)] -> x
     | [DottedList ((_::xs), x)] -> DottedList (xs, x)
-    | [_] -> failwith "Invalid type"
-    | [] | _::_ -> failwith "Invalid number of arguments"
+    | [_] -> raise <| LispTypeException "Invalid type"
+    | [] | _::_ -> raise <| LispNumArgsException "Invalid number of arguments"
 
   let lispCons (argList : list<LispVal>) : LispVal =
     match argList with
     | [x; List xs] -> List (x::xs)
     | [x; DottedList (xs, final)] -> DottedList (x::xs, final)
     | [expr1; expr2] -> DottedList ([expr1], expr2)
-    | [_] -> failwith "Invalid type"
-    | [] | _::_ -> failwith "Invalid number of arguments"
+    | [_] -> raise <| LispTypeException "Invalid type"
+    | [] | _::_ -> raise <| LispNumArgsException "Invalid number of arguments"
 
   let lispList (argList : list<LispVal>) : LispVal = List argList
 
@@ -231,7 +235,7 @@ module Program =
   let apply (func : string) (args : list<LispVal>) : LispVal =
     match Map.tryFind func primitives with
     | Some f -> f args
-    | None -> failwith "Unknown primitive function"
+    | None -> raise <| LispUnboundException "Unknown primitive function"
 
   let rec eval (value : LispVal) =
     match value with
@@ -244,7 +248,7 @@ module Program =
     | List (Atom "quote" :: args) ->
         match args with
         | [expr] -> expr
-        | _ -> failwith "quote: expected single argument"
+        | _ -> raise <| LispNumArgsException "quote: expected single argument"
     // "if" has to be a special form: otherwise, due to eager
     // evaluation, we end up evaluating both branches
     | List (Atom "if" :: args) ->
@@ -252,18 +256,29 @@ module Program =
         | [pred; expr1; expr2] -> if lispTrue pred
                                   then eval expr1
                                   else eval expr2
-        | _ -> failwith "if: Invalid arguments: expected (if pred expr1 expr2)"
+        | _ -> raise <| LispNumArgsException
+                        "if: Invalid arguments: expected (if pred expr1 expr2)"
     | List (Atom f :: args) -> List.map eval args |> apply f
-    | badForm -> failwith "Invalid Lisp form"
+    | badForm -> raise <| LispTypeException "Invalid Lisp form"
 
   let readPrompt prompt = printf "%s" prompt ; Console.ReadLine()
-
-  type MaybeLispVal = Redo | Done of LispVal
 
   let rec REPL () =
     match readPrompt "λ> " with
     | s when s.Trim() = ";" -> ()
-    | s -> readExpr s |> eval |> printVal ; REPL ()
+    | s -> readExpr s |>
+           fun x ->
+           let v = try
+                   Some <| eval x
+                   with
+                   | LispNumArgsException msg
+                   | LispTypeException msg
+                   | LispUnboundException msg -> printfn "%s" msg ; None
+
+           in
+           match v with
+           | Some x -> printVal x ; REPL ()
+           | None -> REPL ()
 
 
   // TODO: checking arglist arity is so common it probably should be abstracted
@@ -273,6 +288,6 @@ module Program =
   // - user-created exceptions
   [<EntryPoint>]
   let main argv =
-    printfn "%s\n%s" "dumblisp REPL" "Enter ';' to exit."
+    printfn "%s\n%s" "-- dumblisp REPL --" "Enter ';' to exit."
     REPL ()
     0
