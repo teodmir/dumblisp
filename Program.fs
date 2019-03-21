@@ -211,6 +211,22 @@ module Program =
 
   let lispList (argList : list<LispVal>) : LispVal = List argList
 
+  type LispEnv = Map<string, LispVal>
+
+  let getVar (env : LispEnv) (var : string) =
+    match Map.tryFind var env with
+    | Some x -> x
+    | None -> raise <| LispUnboundException "Variable is unbound"
+
+  // Destructively set a variable if it exists
+  let setVar (env : LispEnv) (var : string) (def : LispVal) =
+    if Map.containsKey var env
+    then Map.add var env
+    else raise <| LispUnboundException "Attempted to set unbound var"
+
+  let lispDefine (env : LispEnv) (var : string) (def : LispVal) =
+    Map.add var def env
+
   let primitives : Map<string, LispFunction> =
     Map.ofList [
       ("+", arithmeticOp (+))
@@ -231,16 +247,19 @@ module Program =
       ("cons", lispCons)
       ("list", lispList)
     ]
-
   let apply (func : string) (args : list<LispVal>) : LispVal =
     match Map.tryFind func primitives with
     | Some f -> f args
     | None -> raise <| LispUnboundException "Unknown primitive function"
 
-  let rec eval (value : LispVal) =
+  type ValEnvPair = LispVal * LispEnv
+
+  let rec eval (env : LispEnv) (value : LispVal) : ValEnvPair =
     match value with
     // These evaluate to themselves.
-    | String _ | Number _ | Bool _ -> value
+    | String _ | Number _ | Bool _ -> (value, env)
+    // Variable lookup
+    | Atom id -> getVar env id
     // Quoted expressions: a special case of 2 element lists.
     // "Unquotes" the expression.  Cannot be implemented as a
     // primitive since that would force recursive evaluation according
@@ -254,12 +273,13 @@ module Program =
     | List (Atom "if" :: args) ->
         match args with
         | [pred; expr1; expr2] -> if lispTrue pred
-                                  then eval expr1
-                                  else eval expr2
+                                  then eval env expr1
+                                  else eval env expr2
         | _ -> raise <| LispNumArgsException
                         "if: Invalid arguments: expected (if pred expr1 expr2)"
-    | List (Atom f :: args) -> List.map eval args |> apply f
-    | badForm -> raise <| LispTypeException "Invalid Lisp form"
+    | List (Atom f :: args) -> List.map (eval env) args |> apply f
+    | List [Atom "set!", ]
+    | _ -> raise <| LispTypeException "Invalid Lisp form"
 
   let readPrompt prompt = printf "%s" prompt ; Console.ReadLine()
 
@@ -285,7 +305,6 @@ module Program =
   // - More comments
   // - generalize equality
   // - Multiline REPL input
-  // - user-created exceptions
   [<EntryPoint>]
   let main argv =
     printfn "%s\n%s" "-- dumblisp REPL --" "Enter ';' to exit."
