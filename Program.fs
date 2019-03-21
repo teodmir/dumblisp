@@ -218,10 +218,9 @@ module Program =
     | Some x -> x
     | None -> raise <| LispUnboundException "Variable is unbound"
 
-  // Destructively set a variable if it exists
-  let setVar (env : LispEnv) (var : string) (def : LispVal) =
+  let setVar (env : LispEnv) (var : string) (def : LispVal) : LispEnv =
     if Map.containsKey var env
-    then Map.add var env
+    then Map.add var def env
     else raise <| LispUnboundException "Attempted to set unbound var"
 
   let lispDefine (env : LispEnv) (var : string) (def : LispVal) =
@@ -252,21 +251,33 @@ module Program =
     | Some f -> f args
     | None -> raise <| LispUnboundException "Unknown primitive function"
 
-  type ValEnvPair = LispVal * LispEnv
+  type EnvValPair = LispEnv * LispVal
 
-  let rec eval (env : LispEnv) (value : LispVal) : ValEnvPair =
+  // Given a list of (env, val) pairs, apply f to all values and pass around
+  // the environment sequentially
+  let rec mapEnvs (l : list<LispVal>) (e : LispEnv)
+      : (LispEnv * list<LispVal>) =
+      List.fold (fun acc x -> let res = (eval (fst acc) x)
+                              let newEnv = fst res
+                              let newRes = snd res
+                              let oldList = snd acc
+                              in (newEnv, oldList @ [newRes]))
+                (e, [])
+                l
+
+  and eval (env : LispEnv) (value : LispVal) : EnvValPair =
     match value with
     // These evaluate to themselves.
-    | String _ | Number _ | Bool _ -> (value, env)
+    | String _ | Number _ | Bool _ -> (env, value)
     // Variable lookup
-    | Atom id -> getVar env id
+    | Atom id -> (env, getVar env id)
     // Quoted expressions: a special case of 2 element lists.
     // "Unquotes" the expression.  Cannot be implemented as a
     // primitive since that would force recursive evaluation according
     // to the standard list format.
     | List (Atom "quote" :: args) ->
         match args with
-        | [expr] -> expr
+        | [expr] -> (env, expr)
         | _ -> raise <| LispNumArgsException "quote: expected single argument"
     // "if" has to be a special form: otherwise, due to eager
     // evaluation, we end up evaluating both branches
@@ -277,19 +288,26 @@ module Program =
                                   else eval env expr2
         | _ -> raise <| LispNumArgsException
                         "if: Invalid arguments: expected (if pred expr1 expr2)"
-    | List (Atom f :: args) -> List.map (eval env) args |> apply f
-    | List [Atom "set!", ]
+    // Eval form before assigning it to the variable
+    // TODO: change the return values from maps to proper pairs for
+    // less boilerplate
+    | List [Atom "set!"; Atom var; form] ->
+        eval env form |> fun x -> (setVar (fst x) var (snd x), List [])
+    | List [Atom "define"; Atom var; form] ->
+              eval env form |> fun x -> (lispDefine (fst x) var (snd x), List [])
+    | List (Atom f :: args) -> mapEnvs args env |> fun x -> (fst x, apply f (snd x))
     | _ -> raise <| LispTypeException "Invalid Lisp form"
 
   let readPrompt prompt = printf "%s" prompt ; Console.ReadLine()
 
-  let rec REPL () =
+  let rec REPL env =
     match readPrompt "λ> " with
+      // Exit if ";" is entered
     | s when s.Trim() = ";" -> ()
     | s -> readExpr s |>
            fun x ->
            let v = try
-                   Some <| eval x
+                   Some <| eval env x
                    with
                    | LispNumArgsException msg
                    | LispTypeException msg
@@ -297,16 +315,17 @@ module Program =
 
            in
            match v with
-           | Some x -> printVal x ; REPL ()
-           | None -> REPL ()
+           // If evaluation succeeds, pass the new environment recursively
+           | Some x -> printVal (snd x) ; REPL (fst x)
+           | None -> REPL env
 
 
-  // TODO: checking arglist arity is so common it probably should be abstracted
+  // TODO:
   // - More comments
   // - generalize equality
   // - Multiline REPL input
   [<EntryPoint>]
   let main argv =
     printfn "%s\n%s" "-- dumblisp REPL --" "Enter ';' to exit."
-    REPL ()
+    REPL <| Map.ofList []
     0
