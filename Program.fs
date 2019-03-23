@@ -15,6 +15,11 @@ module Program =
     | Number of int
     | String of string
     | Bool of bool
+    | PrimitiveFunc of (list<LispVal> -> LispVal)
+    | LispFunc of LispFunc
+  and LispFunc = { parameters : list<string>; vararg : Option<string>
+                   body : list<LispVal>; closure : LispEnv }
+  and LispEnv = Map<string, LispVal>
 
   // Parse non-letter characters allowed in Scheme atoms.
   let symbol : Parser<char, unit> = anyOf "!#$%&|*+-/:<=>?@^_~"
@@ -99,7 +104,6 @@ module Program =
       | w::ws' -> unwords' ws' (acc + w + " ")
     in unwords' ws ""
 
-  let listWrap (s : string) = "(" + s + ")"
 
   let readExpr input =
     match run parseInteractive input with
@@ -108,6 +112,7 @@ module Program =
 
   // Print the results of evaluation.
   let rec showVal value : string =
+    let listWrap (s : string) = "(" + s + ")"
     match value with
     | String s -> "\"" + s + "\""
     | Atom a -> a
@@ -117,6 +122,15 @@ module Program =
     | List xs -> List.map showVal xs |> unwords |> listWrap
     | DottedList (init, last) ->
         unwords (List.map showVal init) + " . " + showVal last |> listWrap
+    | (PrimitiveFunc _) -> "<primitive>"
+    | LispFunc { parameters = args; vararg = rest } ->
+        let varargString =
+          match rest with
+          | Some a -> "." + a
+          | None -> ""
+        sprintf "(lambda (%s%s) ...)"
+          (unwords args)
+          varargString
 
   let printVal = showVal >> printfn "%s"
 
@@ -211,23 +225,25 @@ module Program =
 
   let lispList (argList : list<LispVal>) : LispVal = List argList
 
-  type LispEnv = Map<string, LispVal>
+  type EnvValPair = LispEnv * LispVal
 
   let getVar (env : LispEnv) (var : string) =
     match Map.tryFind var env with
     | Some x -> x
-    | None -> raise <| LispUnboundException "Variable is unbound"
+    | None -> raise <| LispUnboundException ("Variable is unbound: " + var)
 
-  let setVar (env : LispEnv) (var : string) (def : LispVal) : LispEnv =
+  let setVar (env : LispEnv) (var : string) (def : LispVal) : EnvValPair =
     if Map.containsKey var env
-    then Map.add var def env
+    then (Map.add var def env, List [])
     else raise <| LispUnboundException "Attempted to set unbound var"
 
-  let lispDefine (env : LispEnv) (var : string) (def : LispVal) =
-    Map.add var def env
+  // Add a new, or replace, a binding in the environment
+  let lispDefine (env : LispEnv) (var : string) (def : LispVal)
+      : EnvValPair =
+    (Map.add var def env, List [])
 
-  let primitives : Map<string, LispFunction> =
-    Map.ofList [
+  let primitives : list<(string * LispFunction)> =
+     [
       ("+", arithmeticOp (+))
       ("-", arithmeticOp (-))
       ("*", arithmeticOp (*))
@@ -246,17 +262,40 @@ module Program =
       ("cons", lispCons)
       ("list", lispList)
     ]
-  let apply (func : string) (args : list<LispVal>) : LispVal =
-    match Map.tryFind func primitives with
-    | Some f -> f args
-    | None -> raise <| LispUnboundException "Unknown primitive function"
 
-  type EnvValPair = LispEnv * LispVal
+  let primitiveBindings : LispEnv =
+    let mapSnd f x = (fst x, f (snd x))
+    List.map (mapSnd PrimitiveFunc) primitives |> Map.ofList
 
-  // Given a list of (env, val) pairs, apply f to all values and pass around
-  // the environment sequentially
+  // let apply (func : string) (args : list<LispVal>) : LispVal =
+  //   match Map.tryFind func primitives with
+  //   | Some f -> f args
+  //   | None -> raise <| LispUnboundException "Unknown primitive function"
+
+    // match Map.tryFind func primitives with
+    // | Some f -> f args
+    // | None -> raise <| LispUnboundException "Unknown primitive function"
+
+  let bindVars (e : LispEnv) (binds : list<(string * LispVal)>) : LispEnv =
+    List.fold (fun envSt x -> lispDefine envSt (fst x) (snd x) |> fst ) e binds
+
+  let makeFunc varargs env parameters body =
+    LispFunc { parameters = (List.map showVal parameters);
+               vararg = varargs;
+               body = body;
+               closure = env }
+
+  let makeNormalFunc = makeFunc None
+  let makeVarArgs = showVal >> Some >> makeFunc
+
+  // Run eval on all arguments while ensuring that the environment is
+  // passed from left to right.
+  // While it may be tempting to implement this in terms of foldBack
+  // because of the single element appending, it would break the
+  // left-to-right evaluation order which is necessary when side
+  // effects are used.
   let rec mapEnvs (l : list<LispVal>) (e : LispEnv)
-      : (LispEnv * list<LispVal>) =
+          : (LispEnv * list<LispVal>) =
       List.fold (fun acc x -> let res = (eval (fst acc) x)
                               let newEnv = fst res
                               let newRes = snd res
@@ -283,20 +322,48 @@ module Program =
     // evaluation, we end up evaluating both branches
     | List (Atom "if" :: args) ->
         match args with
-        | [pred; expr1; expr2] -> if lispTrue pred
-                                  then eval env expr1
-                                  else eval env expr2
+        | [pred; expr1; expr2] ->
+            let (newEnv, predRes) = eval env pred
+            if lispTrue predRes
+            then eval newEnv expr1
+            else eval newEnv expr2
         | _ -> raise <| LispNumArgsException
                         "if: Invalid arguments: expected (if pred expr1 expr2)"
-    // Eval form before assigning it to the variable
-    // TODO: change the return values from maps to proper pairs for
-    // less boilerplate
     | List [Atom "set!"; Atom var; form] ->
-        eval env form |> fun x -> (setVar (fst x) var (snd x), List [])
+        eval env form |> fun x -> setVar (fst x) var (snd x)
     | List [Atom "define"; Atom var; form] ->
-              eval env form |> fun x -> (lispDefine (fst x) var (snd x), List [])
-    | List (Atom f :: args) -> mapEnvs args env |> fun x -> (fst x, apply f (snd x))
+        eval env form |> fun x -> lispDefine (fst x) var (snd x)
+    | List (Atom "define" :: List (Atom var :: prms) :: body) ->
+        makeNormalFunc env prms body |> lispDefine env var
+    | List (Atom "define" :: DottedList (Atom var :: prms, varargs) :: body) ->
+        makeVarArgs varargs env prms body |> lispDefine env var
+    | List (Atom "lambda" :: List prms :: body) ->
+        makeNormalFunc env prms body |> fun x -> (env, x)
+    | List (Atom "lambda" :: DottedList (prms, varargs) :: body) ->
+        makeVarArgs varargs env prms body |> fun x -> (env , x)
+    | List (Atom "lambda" :: (Atom _ as varargs) :: body) ->
+        makeVarArgs varargs env [] body |> fun x -> (env, x)
+    | List ((f :: args) as execForm) ->
+        mapEnvs execForm env |> fun x ->
+          match x with
+          | (env', func :: args') -> (fst x, apply func args')
+          | _ -> failwith "Invalid program state"
     | _ -> raise <| LispTypeException "Invalid Lisp form"
+
+  and apply (func : LispVal) (args : list<LispVal>) : LispVal =
+    match func with
+    | PrimitiveFunc f -> f args
+    | LispFunc { parameters = prms; vararg = varargs; body = body; closure = closure } ->
+        if List.length prms <> List.length args
+        then raise <| LispNumArgsException "Invalid number of arguments"
+        else
+          let remainingArgs = List.skip (List.length prms) args
+          let bindVarArgs arg env =
+            match arg with
+            | None -> env
+            | Some x -> bindVars env [(x, List remainingArgs)]
+          bindVars closure (List.zip prms args) |> bindVarArgs varargs
+          |> mapEnvs body |> snd |> List.last
 
   let readPrompt prompt = printf "%s" prompt ; Console.ReadLine()
 
@@ -326,6 +393,6 @@ module Program =
   // - Multiline REPL input
   [<EntryPoint>]
   let main argv =
-    printfn "%s\n%s" "-- dumblisp REPL --" "Enter ';' to exit."
-    REPL <| Map.ofList []
+    printfn "%s\n%s" "-- Dumblisp REPL --" "Enter ';' to exit."
+    REPL <| primitiveBindings
     0
