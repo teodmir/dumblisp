@@ -13,6 +13,8 @@
     <UsePartialTypes>False</UsePartialTypes>
     <BuildOrder>
       <BuildOrder>
+        <String>Types.fs</String>
+        <String>Parsers.fs</String>
         <String>Program.fs</String>
       </BuildOrder>
     </BuildOrder>
@@ -41,7 +43,8 @@
     <DebugSymbols>False</DebugSymbols>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="FSharp.Core, Version=$(TargetFSharpCoreVersion), Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
+    <Reference Include="FSharp.Core">
+      <HintPath>FSharp.Core.4.6.2\lib\net45\FSharp.Core.dll</HintPath>
       <Private>True</Private>
     </Reference>
     <!-- <Reference Include="mscorlib" /> -->
@@ -55,6 +58,10 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Types.fs" />
+    <Compile Include="Parsers.fs" />
+    <Compile Include="Primitives.fs" />
+    <Compile Include="Eval.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <Choose>
