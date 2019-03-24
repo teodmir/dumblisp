@@ -39,7 +39,7 @@ module Primitives =
   let getNum (v : LispVal) : int =
     match v with
     | Number x -> x
-    | _ -> raise <| LispTypeException "Not a number"
+    | _ -> raise <| LispTypeException ("Not a number: " + showVal v)
 
   // Generalization of the basic arithmetic operations in Lisp: used
   // to partially apply and obtain the concrete functions +, -, * and /
@@ -136,6 +136,32 @@ module Primitives =
       : EnvValPair =
     (Map.add var def env, List [])
 
+  // General equality
+  let rec lispEqual (args : LispVal list) : LispVal =
+    let binList x y = [x; y]
+    let fromBool = function
+    | Bool b -> b
+    | _ -> raise <| LispTypeException "fromBool: expected boolean"
+    // Create binary lists of the arguments and recursively check for
+    // equality; extract the booleans and return true if and only if
+    // all of the results are true
+    let listEq xs ys =
+      List.map2 binList xs ys |> List.map (lispEqual >> fromBool)
+      |> List.forall ((=) true)
+    Bool <|
+    match args with
+    | [Atom s1; Atom s2] -> s1 = s2
+    | [Number x; Number y] -> x = y
+    | [Bool x; Bool y] -> x = y
+    | [String s1; String s2] -> s1 = s2
+    | [List xs; List ys] ->
+        List.length xs = List.length ys && listEq xs ys
+    | [DottedList (xs, x'); DottedList (ys, y')] ->
+        listEq xs ys && fromBool <| lispEqual (binList x' y')
+    | [_; _] -> false
+    | [] | [_] | _::_::_::_ ->
+        raise <| LispNumArgsException "equal?: invalid number of arguments"
+
   let primitives : list<(string * (LispVal list -> LispVal))> =
      [
       ("+", arithmeticOp (+))
@@ -155,6 +181,7 @@ module Primitives =
       ("cdr", lispCdr)
       ("cons", lispCons)
       ("list", lispList)
+      ("equal?", lispEqual)
     ]
 
   let primitiveBindings : LispEnv =

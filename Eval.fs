@@ -9,21 +9,19 @@ module Eval =
   let bindVars (e : LispEnv) (binds : list<(string * LispVal)>) : LispEnv =
     List.fold (fun envSt x -> lispDefine envSt (fst x) (snd x) |> fst ) e binds
 
-  let isAtom = function
-  | Atom _ -> true
-  | _ -> false
-
+  // Helper functions for define
   let makeFunc varargs env parameters body =
+    let isAtom = function
+    | Atom _ -> true
+    | _ -> false
     if List.forall isAtom parameters
     then
       match body with
       | [] -> raise <| LispBadFormException "Empty definitions are not allowed"
       | _::_ -> LispFunc { parameters = (List.map showVal parameters);
                            vararg = varargs;
-                           body = body;
-                           closure = env }
-    else raise <| LispBadFormException "Expected identifiers in define"
-
+                           body = body; }
+    else raise <| LispBadFormException "define: expected identifiers"
   let makeNormalFunc = makeFunc None
   let makeVarArgs = showVal >> Some >> makeFunc
 
@@ -70,45 +68,48 @@ module Eval =
                         "if: Invalid arguments: expected (if pred expr1 expr2)"
     | List [Atom "set!"; Atom var; form] ->
         eval env form |> fun x -> setVar (fst x) var (snd x)
+      // Variable definition
     | List [Atom "define"; Atom var; form] ->
         eval env form |> fun x -> lispDefine (fst x) var (snd x)
+      // Normal function definition
     | List (Atom "define" :: List (Atom var :: prms) :: body) ->
         makeNormalFunc env prms body |> lispDefine env var
+      // Function definition with variadic arguments
     | List (Atom "define" :: DottedList (Atom var :: prms, varargs) :: body) ->
         makeVarArgs varargs env prms body |> lispDefine env var
+    | List (Atom "define" :: _) ->
+        raise <| LispBadFormException "define: invalid form"
     | List (Atom "lambda" :: List prms :: body) ->
         makeNormalFunc env prms body |> fun x -> (env, x)
     | List (Atom "lambda" :: DottedList (prms, varargs) :: body) ->
         makeVarArgs varargs env prms body |> fun x -> (env , x)
     | List (Atom "lambda" :: (Atom _ as varargs) :: body) ->
         makeVarArgs varargs env [] body |> fun x -> (env, x)
+    | List (Atom "lambda" :: _) ->
+        raise <| LispBadFormException "lambda: invalid form"
     | List ((f :: args) as execForm) ->
         evalSequentially execForm env |> fun x ->
           match x with
           | (env', func :: args') -> (fst x, apply env func args')
           | _ -> failwith "Invalid program state"
-    | _ -> raise <| LispTypeException "Invalid Lisp form"
+    | _ -> raise <| LispTypeException ("Invalid Lisp form " + showVal value)
 
   and apply (env : LispEnv) (func : LispVal) (args : list<LispVal>) : LispVal =
     match func with
     | PrimitiveFunc f -> f args
-    | LispFunc { parameters = prms; vararg = varargs; body = body; closure = closure } ->
+    | LispFunc { parameters = prms; vararg = varargs; body = body; } ->
         if List.length prms <> List.length args && varargs = None
-        then raise <| LispNumArgsException "Invalid number of arguments"
+        then raise <| LispNumArgsException "apply: Invalid number of arguments"
         else
           let remainingArgs = List.skip (List.length prms) args
           let bindVarArgs arg env =
             match arg with
             | None -> env
             | Some x -> bindVars env [(x, List remainingArgs)]
-          // Let the bindings of e1 shadows the bindings of e2; this
-          // allows us to give the closure priority while using the
-          // main environment as a "fallback"
-          // let mergeEnvs (e1 : LispEnv) (e2 : LispEnv) : LispEnv =
-          //   Map.fold (fun acc key value -> Map.add key value acc) e2 e1
-
           // Evaluate the body in a new environment where the
-          // parameters substituted for the arguments
-          bindVars env (List.zip prms args) |> bindVarArgs varargs
+          // parameters are substituted for the arguments. Lazy zip
+          // used to truncate the longer list which is necessary for
+          // varargs.
+          bindVars env (List.ofSeq (Seq.zip prms args)) |> bindVarArgs varargs
           |> evalSequentially body |> snd |> List.last
     | _ -> raise <| LispTypeException "apply: invalid form"

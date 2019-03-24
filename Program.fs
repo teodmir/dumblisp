@@ -83,11 +83,6 @@ module Program =
         |> snd |> List.last |> Result.Ok
     | Failure (errmsg, _, _) -> Result.Error errmsg
 
-// TODO:
-  // - More comments
-  // - generalize equality
-  // - Error check for well formed define
-  // - Closure is never used
   [<EntryPoint>]
   let main argv =
     if argv.Length > 0

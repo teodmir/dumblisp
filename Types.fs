@@ -12,7 +12,7 @@ module Types =
     | PrimitiveFunc of (list<LispVal> -> LispVal)
     | LispFunc of LispFunc
   and LispFunc = { parameters : list<string>; vararg : Option<string>
-                   body : list<LispVal>; closure : LispEnv }
+                   body : list<LispVal>; }
   and LispEnv = Map<string, LispVal>
 
   // Accessing unbound symbols
