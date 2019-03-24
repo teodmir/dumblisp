@@ -11,9 +11,11 @@ module Types =
     | Bool of bool
     | PrimitiveFunc of (list<LispVal> -> LispVal)
     | LispFunc of LispFunc
+
   and LispFunc = { parameters : list<string>; vararg : Option<string>
                    body : list<LispVal>; }
-  and LispEnv = Map<string, LispVal>
+
+  type LispEnv = Map<string, LispVal>
 
   // Accessing unbound symbols
   exception LispUnboundException of string

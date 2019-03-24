@@ -23,7 +23,7 @@ module Program =
 
   // Not sure why the newline needs to be manually appended. The null
   // checking is for the EOF character, which makes ReadLine() return
-  // null. Consider returning early
+  // null.
   let readPrompt prompt =
     printf "%s" prompt
     match Console.ReadLine() with
@@ -85,12 +85,13 @@ module Program =
 
   [<EntryPoint>]
   let main argv =
-    if argv.Length > 0
-    then
-      match evalFile argv.[0] primitiveBindings with
+    match argv with
+    | [||] ->
+        printfn "Dumblisp REPL: enter ';' to exit"
+        REPL primitiveBindings ""
+        0
+    | [|file|] ->
+      match evalFile file primitiveBindings with
       | Result.Ok value -> printfn "%s" (showVal value) ; 0
       | Result.Error msg -> printfn "%s" msg ; 1
-    else
-      printfn "Dumblisp REPL: enter ';' to exit"
-      REPL primitiveBindings ""
-      0
+    | _ -> printfn "%s" "Expected exactly 0 or 1 arguments" ; 1

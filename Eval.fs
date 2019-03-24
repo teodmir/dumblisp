@@ -7,7 +7,7 @@ module Eval =
   open Primitives
 
   let bindVars (e : LispEnv) (binds : list<(string * LispVal)>) : LispEnv =
-    List.fold (fun envSt x -> lispDefine envSt (fst x) (snd x) |> fst ) e binds
+    List.fold (fun envSt x -> lispDefine envSt (fst x) (snd x) |> fst) e binds
 
   // Helper functions for define
   let makeFunc varargs env parameters body =
@@ -47,7 +47,6 @@ module Eval =
     | String _ | Number _ | Bool _ -> (env, value)
     // Variable lookup
     | Atom id -> (env, getVar env id)
-    // Quoted expressions: a special case of 2 element lists.
     // "Unquotes" the expression.  Cannot be implemented as a
     // primitive since that would force recursive evaluation according
     // to the standard list format.
